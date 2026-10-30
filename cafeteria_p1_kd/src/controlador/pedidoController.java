@@ -1,122 +1,136 @@
 package controlador;
 
-import java.util.ArrayList;
+import java.awt.Window;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
  
 import modelo.itemPedido;
 import modelo.pedido;
-import modelo.pedidoRepositorio;
 import modelo.producto;
-import modelo.productoRepositorio;
-import vista.consolaView;
+import vista.pedidoView;
+import vista.reporteView;
 
 public class pedidoController {
-	private consolaView vista;
-    private productoRepositorio productoRepo;
-    private pedidoRepositorio pedidoRepo;
- 
-    public pedidoController(consolaView vista, productoRepositorio productoRepo, pedidoRepositorio pedidoRepo) {
-        this.vista = vista;
-        this.productoRepo = productoRepo;
-        this.pedidoRepo = pedidoRepo;
-    }
+	private pedidoView vistaPedido;
+    private pedido actual;
+    private producto.catalogoTableModel catalogo;
+    private pedido.itemsTableModel items;
  
     // ---------- Registrar pedido ----------
  
-    public void registrarPedido() {
-        ArrayList<producto> productos = productoRepo.leerTodos();
-        pedido nuevo = new pedido();
+    public void abrirPedido(Window dueno) {
+        actual = new pedido();
+        catalogo = new producto.catalogoTableModel(actual);
+        items = new pedido.itemsTableModel(actual);
  
-        if (obtenerDisponibles(productos, nuevo).isEmpty()) {
-            vista.mostrarMensaje("No existen productos en el inventario");
-            return;
-        }
+        vistaPedido = new pedidoView(dueno);
+        vistaPedido.setModeloCatalogo(catalogo);
+        vistaPedido.setModeloPedido(items);
+        vistaPedido.setTotal(0);
  
-        boolean finalizar = false;
-        boolean cancelado = false;
-        while (!finalizar) {
-            // Se recalcula cada vuelta: un producto sin stock restante deja de mostrarse.
-            ArrayList<producto> disponibles = obtenerDisponibles(productos, nuevo);
-            if (disponibles.isEmpty()) {
-                vista.mostrarMensaje("No hay más productos disponibles.");
-                break;
+        vistaPedido.addCatalogoSeleccionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                ajustarCantidadMaxima();
             }
+        });
+        vistaPedido.addAgregarListener(e -> agregar());
+        vistaPedido.addFinalizarListener(e -> finalizar());
+        vistaPedido.addCancelarListener(e -> cancelar());
+        vistaPedido.alCerrar(() -> cancelar());
  
-            vista.mostrarCatalogo(disponibles);
-            int opcion = vista.leerEntero("Seleccione un producto: ", 0, disponibles.size());
- 
-            if (opcion == 0) {
-                if (nuevo.estaVacio() || vista.confirmar("¿Descartar el pedido actual? (s/n): ")) {
-                    cancelado = true;
-                    break;
-                }
-                continue;
-            }
- 
-            producto elegido = disponibles.get(opcion - 1);
-            int restante = elegido.getStock() - nuevo.getCantidadDe(elegido.getCodigo());
-            int cantidad = vista.leerEntero("Cantidad (1-" + restante + "): ", 1, restante);
-            nuevo.agregarProducto(elegido, cantidad);
- 
-            vista.mostrarMenuAgregarOtro();
-            int siguiente = vista.leerEntero("Seleccione una opción: ", 1, 2);
-            switch (siguiente) {
-                case 1:
-                    break;
-                case 2:
-                    finalizar = true;
-                    break;
-            }
-        }
- 
-        if (cancelado || nuevo.estaVacio()) {
-            vista.mostrarMensaje("Pedido cancelado.");
-            return;
-        }
-        finalizarPedido(productos, nuevo);
+        vistaPedido.setVisible(true);
     }
  
-    private void finalizarPedido(ArrayList<producto> productos, pedido nuevo) {
-        vista.mostrarResumenPedido(nuevo);
+    // El máximo de la cantidad es lo que queda disponible del producto elegido.
+    private void ajustarCantidadMaxima() {
+        int fila = vistaPedido.getFilaCatalogo();
+        if (fila < 0) {
+            vistaPedido.setCantidadMaxima(1);
+        } else {
+            vistaPedido.setCantidadMaxima(catalogo.getDisponible(fila));
+        }
+    }
  
-        for (itemPedido item : nuevo.getItems()) {
-            producto p = productoRepo.buscarEnLista(productos, item.getCodigo());
+    private void agregar() {
+        int fila = vistaPedido.getFilaCatalogo();
+        if (fila < 0) {
+            vistaPedido.mostrarAdvertencia("Seleccione un producto del catálogo.");
+            return;
+        }
+ 
+        producto elegido = catalogo.getProducto(fila);
+        int cantidad = vistaPedido.getCantidad();
+        if (cantidad < 1 || cantidad > catalogo.getDisponible(fila)) {
+            vistaPedido.mostrarAdvertencia("La cantidad debe estar entre 1 y " + catalogo.getDisponible(fila) + ".");
+            return;
+        }
+ 
+        actual.agregarProducto(elegido, cantidad);
+        catalogo.refrescar();
+        items.refrescar();
+        vistaPedido.setTotal(actual.getTotal());
+ 
+        if (catalogo.getRowCount() == 0) {
+            vistaPedido.mostrarInfo("No hay más productos disponibles. Puede finalizar el pedido.");
+        }
+    }
+ 
+    private void finalizar() {
+        if (actual.estaVacio()) {
+            vistaPedido.mostrarAdvertencia("El pedido está vacío. Agregue productos o cancele el pedido.");
+            return;
+        }
+ 
+        String resumen = construirResumen();
+ 
+        for (itemPedido item : actual.getItems()) {
+            producto p = producto.buscar(item.getCodigo());
             p.setStock(p.getStock() - item.getCantidad());
         }
  
-        if (productoRepo.guardarTodos(productos) && pedidoRepo.guardar(nuevo)) {
-            vista.mostrarMensaje("\nPedido registrado correctamente.");
+        if (producto.guardar() && actual.guardar()) {
+            vistaPedido.mostrarInfo("Pedido registrado correctamente.\n\n" + resumen);
+            vistaPedido.cerrar();
         } else {
-            vista.mostrarMensaje("\nError: no se pudo guardar el pedido.");
-        }
-    }
- 
-    // Productos con unidades todavía disponibles (descontando lo ya agregado al pedido).
-    private ArrayList<producto> obtenerDisponibles(ArrayList<producto> productos, pedido actual) {
-        ArrayList<producto> disponibles = new ArrayList<>();
-        for (producto p : productos) {
-            if (p.getStock() - actual.getCantidadDe(p.getCodigo()) > 0) {
-                disponibles.add(p);
+            for (itemPedido item : actual.getItems()) {
+                producto p = producto.buscar(item.getCodigo());
+                p.setStock(p.getStock() + item.getCantidad());
             }
+            producto.guardar();
+            vistaPedido.mostrarError("No se pudo guardar el pedido.");
         }
-        return disponibles;
     }
  
-    // ---------- Resumen ----------
- 
-    public void mostrarResumen() {
-        ArrayList<pedido> pedidos = pedidoRepo.leerTodos();
-        if (pedidos.isEmpty()) {
-            vista.mostrarMensaje("No hay pedidos registrados.");
-            return;
+    private void cancelar() {
+        if (actual.estaVacio()) {
+            vistaPedido.cerrar();
+        } else if (vistaPedido.confirmar("¿Descartar el pedido actual?")) {
+            vistaPedido.mostrarInfo("Pedido cancelado.");
+            vistaPedido.cerrar();
         }
+    }
  
+    // Resumen del pedido: nombre, cantidad, subtotal y total.
+    private String construirResumen() {
+        StringBuilder sb = new StringBuilder();
+        for (itemPedido item : actual.getItems()) {
+            sb.append(item.getNombre())
+                    .append(" | Cantidad: ").append(item.getCantidad())
+                    .append(" | Subtotal: ").append(pedido.formatoDinero(item.getSubtotal()))
+                    .append("\n");
+        }
+        sb.append("\nTOTAL: ").append(pedido.formatoDinero(actual.getTotal()));
+        return sb.toString();
+    }
+ 
+    // ---------- Reporte ----------
+ 
+    public void abrirReporte(Window dueno) {
         double totalVentas = 0;
         HashMap<Integer, Integer> unidadesPorCodigo = new HashMap<>();
         LinkedHashMap<Integer, String> nombres = new LinkedHashMap<>();
  
-        for (pedido p : pedidos) {
+        for (pedido p : pedido.getHistorial()) {
             totalVentas += p.getTotal();
             for (itemPedido item : p.getItems()) {
                 unidadesPorCodigo.merge(item.getCodigo(), item.getCantidad(), Integer::sum);
@@ -130,13 +144,19 @@ public class pedidoController {
             maximo = Math.max(maximo, unidades);
         }
  
-        ArrayList<String> masVendidos = new ArrayList<>();
+        // Todos los productos empatados con el máximo de unidades vendidas.
+        StringBuilder masVendidos = new StringBuilder();
         for (int codigo : nombres.keySet()) {
             if (unidadesPorCodigo.get(codigo) == maximo) {
-                masVendidos.add(nombres.get(codigo));
+                masVendidos.append(nombres.get(codigo))
+                        .append(" - ").append(maximo).append(" unidades\n");
             }
         }
  
-        vista.mostrarResumenVentas(pedidos, totalVentas, masVendidos, maximo);
+        reporteView vistaReporte = new reporteView(dueno);
+        vistaReporte.setModeloPedidos(new pedido.resumenTableModel());
+        vistaReporte.setTotalVentas(totalVentas);
+        vistaReporte.setMasVendidos(masVendidos.toString());
+        vistaReporte.setVisible(true);
     }
 }
